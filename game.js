@@ -1,24 +1,24 @@
 // ============================================================
 // CYBERCELL: LIFE PROTOCOL — движок
+// v0.4: цепочки, опции с req_flag, выселение
 // ============================================================
 
-const SAVE_KEY = "cybercell_save_v3";
+const SAVE_KEY = "cybercell_save_v4";
 
 function newState() {
   return {
     day: 1,
     phase: "morning",
-    stats: { health: 100, stress: 20, clarity: 50, hunger: 30 },
+    stats: { health: 100, stress: 20, clarity: 50, hunger: 20 },
     cyber: 0,
     credits: 80,
     flags: {},
-    counters: {},
+    counters: { debt: 0 },
     rel: { v: 0, kestrel: 0, mira: 0 },
     factions: { ether: 0, claw: 0, stream: 0, lotus: 0, free: 0 },
     location: "apartment",
     usedOnce: [],
     cooldowns: {},
-    scheduled: [],
     log: [],
     ended: false,
     pendingCard: null,
@@ -42,8 +42,12 @@ function checkReq(req, s) {
   if (req.day_min !== undefined && s.day < req.day_min) return false;
   if (req.cyber_min !== undefined && s.cyber < req.cyber_min) return false;
   if (req.cyber_max !== undefined && s.cyber > req.cyber_max) return false;
+  if (req.credit_max !== undefined && s.credits > req.credit_max) return false;
   if (req.flag) for (const k in req.flag) {
     if ((s.flags[k] || false) !== req.flag[k]) return false;
+  }
+  if (req.flag_not) for (const k in req.flag_not) {
+    if ((s.flags[k] || false) === req.flag_not[k]) return false;
   }
   if (req.rel) for (const k in req.rel) {
     const v = s.rel[k] || 0;
@@ -61,7 +65,7 @@ function applyEffects(e) {
   if (e.stats) for (const k in e.stats) {
     S.stats[k] = clamp((S.stats[k] || 0) + e.stats[k], 0, 100);
   }
-  if (e.credits) S.credits = Math.max(0, S.credits + e.credits);
+  if (e.credits !== undefined) S.credits = Math.max(0, S.credits + e.credits);
   if (e.cyber)   S.cyber = clamp(S.cyber + e.cyber, 0, 100);
   if (e.flags_set)    for (const k in e.flags_set) S.flags[k] = e.flags_set[k];
   if (e.flags_remove) for (const k of e.flags_remove) delete S.flags[k];
@@ -70,10 +74,10 @@ function applyEffects(e) {
   if (e.counter) for (const k in e.counter) S.counters[k] = (S.counters[k] || 0) + e.counter[k];
 }
 
-// Обязательная сюжетная карточка — приоритет над свободным пулом
 function pickStoryCard() {
   return CARDS.find(c =>
     c.story === true &&
+    !c.hidden &&
     !S.usedOnce.includes(c.id) &&
     checkReq(c.req, S)
   ) || null;
@@ -82,6 +86,7 @@ function pickStoryCard() {
 function pickFreeCard() {
   const pool = CARDS.filter(c => {
     if (c.story) return false;
+    if (c.hidden) return false;
     if (c.once && S.usedOnce.includes(c.id)) return false;
     if (c.cd && S.cooldowns[c.id] && S.cooldowns[c.id] > S.day) return false;
     return checkReq(c.req, S);
@@ -100,14 +105,18 @@ const PHASES = ["morning", "midday", "evening", "night"];
 const PHASE_NAMES = { morning: "Утро", midday: "День", evening: "Вечер", night: "Ночь" };
 const PHASE_ICONS = { morning: "☀", midday: "●", evening: "◐", night: "☾" };
 
-function advancePhase() {
-  if (busy) return;
+function markPendingUsed() {
   if (S.pendingCard) {
-    if (S.pendingCard.once) S.usedOnce.push(S.pendingCard.id);
-    if (S.pendingCard.cd)   S.cooldowns[S.pendingCard.id] = S.day + S.pendingCard.cd;
+    const c = S.pendingCard;
+    if (c.once && !S.usedOnce.includes(c.id)) S.usedOnce.push(c.id);
+    if (c.cd) S.cooldowns[c.id] = S.day + c.cd;
     S.pendingCard = null;
   }
+}
 
+function advancePhase() {
+  if (busy) return;
+  markPendingUsed();
   const idx = PHASES.indexOf(S.phase);
   if (idx < PHASES.length - 1) {
     S.phase = PHASES[idx + 1];
@@ -122,43 +131,56 @@ function newDay() {
   S.day += 1;
   S.phase = "morning";
 
-  // Ежедневные расходы
-  S.credits = Math.max(0, S.credits - 15);
-  if (S.credits <= 0) {
-    S.stats.stress = clamp(S.stats.stress + 10, 0, 100);
-    log("Нечем платить за капсулу. Стресс +10", "danger");
+  // --- Аренда / долг ---
+  const dailyCost = 15;
+  if (S.credits >= dailyCost) {
+    S.credits -= dailyCost;
+    if (S.counters.debt > 0) S.counters.debt -= 1;
+    log("Аренда: -" + dailyCost + "₡", "");
+  } else {
+    S.credits = 0;
+    S.counters.debt = (S.counters.debt || 0) + 1;
+    S.stats.stress = clamp(S.stats.stress + 12, 0, 100);
+    log("Нечем платить за капсулу. Долг: " + S.counters.debt + " дн.", "danger");
   }
 
-  // Голод
-  S.stats.hunger = clamp(S.stats.hunger + 20, 0, 100);
+  // --- Выселение после 3 дней долга ---
+  if (S.counters.debt >= 3 && !S.flags.evicted) {
+    S.flags.evicted = true;
+    S.stats.stress = clamp(S.stats.stress + 20, 0, 100);
+    S.location = "street";
+    log("ТЕБЯ ВЫСЕЛИЛИ. Капсула 7-Б закрыта.", "danger");
+  }
+
+  // --- Если выселен — живёшь на улице ---
+  if (S.flags.evicted) {
+    S.location = "street";
+    S.stats.health = clamp(S.stats.health - 4, 0, 100);
+    S.stats.stress = clamp(S.stats.stress + 6, 0, 100);
+  } else {
+    S.location = "apartment";
+  }
+
+  // --- Голод ---
+  S.stats.hunger = clamp(S.stats.hunger + 15, 0, 100);
   if (S.stats.hunger >= 100) {
-    S.stats.health = clamp(S.stats.health - 20, 0, 100);
-    log("Голод критичен. Здоровье -20", "danger");
+    S.stats.health = clamp(S.stats.health - 10, 0, 100);
+    log("Ты истощён. Здоровье -10", "danger");
   } else if (S.stats.hunger > 70) {
-    S.stats.health = clamp(S.stats.health - 5, 0, 100);
-    log("Ты голоден. Здоровье -5", "amber");
+    S.stats.health = clamp(S.stats.health - 3, 0, 100);
+    log("Голод. Здоровье -3", "amber");
   }
 
-  // Стресс высокий — снижает здоровье
+  // --- Стресс ---
   if (S.stats.stress > 80) {
-    S.stats.health = clamp(S.stats.health - 8, 0, 100);
-    log("Стресс разрушает тело. Здоровье -8", "danger");
+    S.stats.health = clamp(S.stats.health - 5, 0, 100);
+    log("Стресс разрушает. Здоровье -5", "danger");
   }
 
-  // Естественное снижение киберпсихоза
+  // --- Естественное снижение киберпсихоза ---
   if (S.cyber > 0) S.cyber = clamp(S.cyber - 1, 0, 100);
 
-  // Отложенные события (заглушка)
-  S.scheduled = S.scheduled.filter(ev => {
-    if (ev.in_days <= 0) {
-      log(`Отложенное событие: ${ev.id}`, "amber");
-      return false;
-    }
-    ev.in_days -= 1;
-    return true;
-  });
-
-  log(`— День ${S.day} —`, "amber");
+  log("— День " + S.day + " —", "amber");
 
   showDayOverlay(S.day);
   busy = true;
@@ -206,6 +228,12 @@ function renderHUD() {
     : "var(--danger)";
   const healthClass = S.stats.health < 30 ? "d hud-warn" : "g";
   const hungerClass = S.stats.hunger > 70 ? "d hud-warn" : "";
+  const debtLine = S.counters.debt > 0
+    ? `<div class="hud-row"><span class="hud-label">Долг</span><span class="hud-val d">${S.counters.debt} дн.</span></div>`
+    : "";
+  const evictedLine = S.flags.evicted
+    ? `<div class="hud-row"><span class="hud-label">Статус</span><span class="hud-val d hud-warn">ВЫСЕЛЕН</span></div>`
+    : "";
   hud.innerHTML = `
     <div class="hud-row"><span class="hud-label">День</span><span class="hud-val">${S.day} · ${PHASE_NAMES[S.phase]}</span></div>
     <div class="hud-row"><span class="hud-label">Кредиты</span><span class="hud-val">₡${S.credits}</span></div>
@@ -213,6 +241,8 @@ function renderHUD() {
     <div class="hud-row"><span class="hud-label">Стресс</span><span class="hud-val ${S.stats.stress > 70 ? 'd' : ''}">${S.stats.stress}</span></div>
     <div class="hud-row"><span class="hud-label">Ясность</span><span class="hud-val c">${S.stats.clarity}</span></div>
     <div class="hud-row"><span class="hud-label">Голод</span><span class="hud-val ${hungerClass}">${S.stats.hunger}</span></div>
+    ${debtLine}
+    ${evictedLine}
     <div class="hud-cyber-bar"><div class="hud-cyber-fill" style="width:${S.cyber}%;background:${cyberColor}"></div></div>
     <div class="hud-cyber-text"><span>КИБЕРПСИХОЗ</span><span style="color:${cyberColor}">${S.cyber}%</span></div>
   `;
@@ -221,17 +251,20 @@ function renderHUD() {
 function renderStage() {
   const stage = document.getElementById("stage");
 
-  // Проверка смерти от голода/здоровья
-  if (S.stats.health <= 0 || S.stats.hunger >= 100) {
+  if (S.stats.health <= 0) {
     S.ended = true;
     S.endingId = "death_end";
     renderEnding();
     return;
   }
 
-  // СЮЖЕТ ИМЕЕТ ПРИОРИТЕТ
-  let card = pickStoryCard();
-  if (!card) card = pickFreeCard();
+  // Если уже есть pendingCard (цепочка) — рендерим его
+  let card = S.pendingCard;
+  if (!card) {
+    card = pickStoryCard();
+    if (!card) card = pickFreeCard();
+    if (card) S.pendingCard = card;
+  }
 
   if (!card) {
     stage.className = "stage-scene-apartment";
@@ -246,8 +279,6 @@ function renderStage() {
     `;
     return;
   }
-
-  S.pendingCard = card;
 
   const sceneKey = getSceneForCard(card, S);
   const scene = ART.locations[sceneKey] || ART.locations.apartment;
@@ -279,9 +310,16 @@ function renderStage() {
   }
 }
 
+function getAvailableOptions(card) {
+  return card.opts.filter(o => {
+    if (o.req_flag && !S.flags[o.req_flag]) return false;
+    return true;
+  });
+}
+
 function renderNormalCard(card, banner, visual) {
   const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) =>
+  const opts = getAvailableOptions(card).map((o, i) =>
     `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
   ).join("");
   const catClass = card.story ? "card-cat story" : "card-cat";
@@ -298,7 +336,7 @@ function renderNormalCard(card, banner, visual) {
 
 function renderCutscene(card, banner, visual) {
   const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) =>
+  const opts = getAvailableOptions(card).map((o, i) =>
     `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
   ).join("");
   stage.innerHTML = `
@@ -318,7 +356,7 @@ function renderBureaucracy(card, banner, visual) {
       <span>${f.k}</span><span>${f.v}</span>
     </div>
   `).join("");
-  const opts = card.opts.map((o, i) =>
+  const opts = getAvailableOptions(card).map((o, i) =>
     `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
   ).join("");
   stage.innerHTML = `
@@ -338,10 +376,25 @@ function chooseOption(i) {
   if (busy) return;
   const card = S.pendingCard;
   if (!card) return;
-  const opt = card.opts[i];
+  const availableOpts = getAvailableOptions(card);
+  const opt = availableOpts[i];
   if (!opt) return;
-  log(`▸ ${opt.t}`, "amber");
+  log("▸ " + opt.t, "amber");
   applyEffects(opt.e);
+
+  // Цепочка: показать следующий скрытый кадр
+  if (opt.next) {
+    if (card.once && !S.usedOnce.includes(card.id)) S.usedOnce.push(card.id);
+    if (card.cd) S.cooldowns[card.id] = S.day + card.cd;
+    const nextCard = CARDS.find(c => c.id === opt.next);
+    if (nextCard) {
+      S.pendingCard = nextCard;
+      checkEnding();
+      render();
+      return;
+    }
+  }
+
   if (S.cyber >= 100) { S.ended = true; S.endingId = "cyber_end"; }
   advancePhase();
 }
@@ -402,6 +455,7 @@ function loadGame() {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return false;
     S = JSON.parse(raw);
+    if (!S.counters) S.counters = { debt: 0 };
     return true;
   } catch (e) { return false; }
 }
@@ -417,7 +471,7 @@ function openMenu() {
         <button class="opt" onclick="if(confirm('Начать заново?')){restart();closeMenu()}">Новая жизнь</button>
         <button class="opt" onclick="closeMenu()">Закрыть</button>
       </div>
-      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL v0.3 · сюжет 7 дней</p>
+      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL v0.4 · еда, долги, цепочки</p>
     </div>
   `;
 }
