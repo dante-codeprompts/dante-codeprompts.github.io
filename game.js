@@ -4,7 +4,6 @@
 
 const SAVE_KEY = "cybercell_save_v1";
 
-// --- СОСТОЯНИЕ ---
 function newState() {
   return {
     day: 1,
@@ -28,26 +27,14 @@ function newState() {
 }
 
 let S = newState();
+let busy = false;
 
-// --- УТИЛИТЫ ---
-function cmp(a, op, b) {
-  switch (op) {
-    case ">": return a > b;
-    case ">=": return a >= b;
-    case "<": return a < b;
-    case "<=": return a <= b;
-    case "==": return a === b;
-    case "!=": return a !== b;
-    default: return a >= b;
-  }
-}
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function log(msg, cls = "") {
   S.log.unshift({ msg, cls, day: S.day, phase: S.phase });
   if (S.log.length > 30) S.log.pop();
 }
 
-// --- УСЛОВИЯ ---
 function checkReq(req, s) {
   if (!req) return true;
   if (req.phase && !req.phase.includes(s.phase)) return false;
@@ -63,9 +50,7 @@ function checkReq(req, s) {
   if (req.rel) {
     for (const k in req.rel) {
       const v = s.rel[k] || 0;
-      const target = req.rel[k];
-      // ">= N" means at least N
-      if (typeof target === "number" && v < target) return false;
+      if (typeof req.rel[k] === "number" && v < req.rel[k]) return false;
     }
   }
   if (req.faction) {
@@ -77,29 +62,21 @@ function checkReq(req, s) {
   return true;
 }
 
-// --- ЭФФЕКТЫ ---
 function applyEffects(e) {
   if (!e) return;
   if (e.stats) for (const k in e.stats) {
     S.stats[k] = clamp((S.stats[k] || 0) + e.stats[k], 0, 100);
   }
   if (e.credits) S.credits = Math.max(0, S.credits + e.credits);
-  if (e.cyber) S.cyber = clamp(S.cyber + e.cyber, 0, 100);
-  if (e.flags_set) for (const k in e.flags_set) S.flags[k] = e.flags_set[k];
+  if (e.cyber)   S.cyber = clamp(S.cyber + e.cyber, 0, 100);
+  if (e.flags_set)    for (const k in e.flags_set) S.flags[k] = e.flags_set[k];
   if (e.flags_remove) for (const k of e.flags_remove) delete S.flags[k];
-  if (e.rel) for (const k in e.rel) {
-    S.rel[k] = clamp((S.rel[k] || 0) + e.rel[k], -100, 100);
-  }
-  if (e.faction) for (const k in e.faction) {
-    S.factions[k] = clamp((S.factions[k] || 0) + e.faction[k], -100, 100);
-  }
-  if (e.counter) for (const k in e.counter) {
-    S.counters[k] = (S.counters[k] || 0) + e.counter[k];
-  }
+  if (e.rel)     for (const k in e.rel)     S.rel[k]     = clamp((S.rel[k] || 0) + e.rel[k], -100, 100);
+  if (e.faction) for (const k in e.faction) S.factions[k] = clamp((S.factions[k] || 0) + e.faction[k], -100, 100);
+  if (e.counter) for (const k in e.counter) S.counters[k] = (S.counters[k] || 0) + e.counter[k];
   if (e.schedule) S.scheduled.push(e.schedule);
 }
 
-// --- ВЫБОР КАРТОЧКИ ---
 function pickCard() {
   const pool = CARDS.filter(c => {
     if (c.once && S.usedOnce.includes(c.id)) return false;
@@ -116,34 +93,32 @@ function pickCard() {
   return pool[pool.length - 1];
 }
 
-// --- ВРЕМЯ ---
 const PHASES = ["morning", "midday", "evening", "night"];
 const PHASE_NAMES = { morning: "Утро", midday: "День", evening: "Вечер", night: "Ночь" };
+const PHASE_ICONS = { morning: "☀", midday: "●", evening: "◐", night: "☾" };
 
 function advancePhase() {
-  // Записываем использование карточки
+  if (busy) return;
   if (S.pendingCard) {
     if (S.pendingCard.once) S.usedOnce.push(S.pendingCard.id);
-    if (S.pendingCard.cd) S.cooldowns[S.pendingCard.id] = S.day + S.pendingCard.cd;
+    if (S.pendingCard.cd)   S.cooldowns[S.pendingCard.id] = S.day + S.pendingCard.cd;
     S.pendingCard = null;
   }
 
   const idx = PHASES.indexOf(S.phase);
   if (idx < PHASES.length - 1) {
     S.phase = PHASES[idx + 1];
+    checkEnding();
+    render();
   } else {
-    // Ночь прошла — новый день
     newDay();
   }
-  checkEnding();
-  render();
 }
 
 function newDay() {
   S.day += 1;
   S.phase = "morning";
 
-  // Ежедневные расходы
   const dailyCost = 15;
   S.credits = Math.max(0, S.credits - dailyCost);
   if (S.credits <= 0) {
@@ -151,16 +126,13 @@ function newDay() {
     log("Нечем платить за капсулу. Стресс +10", "danger");
   }
 
-  // Голод
   S.stats.hunger = clamp(S.stats.hunger + 15, 0, 100);
   if (S.stats.hunger > 70) {
     S.stats.health = clamp(S.stats.health - 5, 0, 100);
   }
 
-  // Естественное снижение киберпсихоза
   if (S.cyber > 0) S.cyber = clamp(S.cyber - 1, 0, 100);
 
-  // Отложенные события
   S.scheduled = S.scheduled.filter(ev => {
     if (ev.in_days <= 0) {
       if (ev.flag && !S.flags[ev.flag]) return false;
@@ -171,13 +143,29 @@ function newDay() {
     return true;
   });
 
-  // Снижаем кулдауны
-  // (уже проверяется через S.cooldowns > S.day)
-
   log(`— День ${S.day} —`, "amber");
+
+  showDayOverlay(S.day);
+  busy = true;
+  setTimeout(() => {
+    busy = false;
+    checkEnding();
+    render();
+  }, 1500);
 }
 
-// --- ПРОВЕРКА КОНЦОВОК ---
+function showDayOverlay(day) {
+  const el = document.createElement("div");
+  el.className = "day-overlay";
+  el.innerHTML = `
+    <div class="num">ДЕНЬ ${String(day).padStart(2, "0")}</div>
+    <div class="line"></div>
+    <div class="label">ПРОБУЖДЕНИЕ</div>
+  `;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1600);
+}
+
 function checkEnding() {
   for (const e of ENDINGS) {
     if (e.check(S)) {
@@ -188,7 +176,6 @@ function checkEnding() {
   }
 }
 
-// --- РЕНДЕР ---
 function render() {
   if (S.ended) { renderEnding(); return; }
   renderHUD();
@@ -217,7 +204,6 @@ function renderHUD() {
 function renderStage() {
   const stage = document.getElementById("stage");
 
-  // Применяем отложенные последствия голода/стресса
   if (S.stats.health <= 0) {
     S.ended = true;
     S.endingId = "death_end";
@@ -227,34 +213,57 @@ function renderStage() {
 
   const card = pickCard();
   if (!card) {
+    stage.className = "stage-scene-apartment";
     stage.innerHTML = `
-      <div class="card-cat"><span>ПУСТОТА</span></div>
+      <div class="scene-banner">
+        <span class="loc">▣ ПУСТОТА</span>
+        <span class="phase-tag">${PHASE_ICONS[S.phase]} ${PHASE_NAMES[S.phase]}</span>
+      </div>
       <div class="card-title">Ничего не происходит</div>
       <div class="card-desc">В это время суток здесь нечего делать. Ты просто существуешь.</div>
-      <div class="options">
-        <button class="opt" onclick="advancePhase()">Ждать</button>
-      </div>
+      <div class="options"><button class="opt" onclick="advancePhase()">Ждать</button></div>
     `;
     return;
   }
   S.pendingCard = card;
 
-  // Тип карточки: cutscene / bureaucracy / обычная
+  const sceneKey = getSceneForCard(card, S);
+  const scene = ART.locations[sceneKey] || ART.locations.apartment;
+  stage.className = "stage-scene-" + sceneKey;
+
+  const banner = `
+    <div class="scene-banner">
+      <span class="loc">${scene.icon} ${scene.label}</span>
+      <span class="phase-tag">${PHASE_ICONS[S.phase]} ${PHASE_NAMES[S.phase]}</span>
+    </div>
+  `;
+
+  let visual = "";
+  const portrait = getPortraitForCard(card);
+  const cutsceneSvg = (typeof ART.cutscenes !== "undefined") ? ART.cutscenes[card.id] : null;
+  if (portrait) {
+    visual = `<div class="portrait-frame">${portrait}</div>`;
+  } else if (cutsceneSvg) {
+    visual = `<div class="cutscene-frame">${cutsceneSvg}</div>`;
+  }
+
   if (card.desc === "cutscene") {
-    renderCutscene(card);
+    renderCutscene(card, banner, visual);
   } else if (card.desc === "bureaucracy") {
-    renderBureaucracy(card);
+    renderBureaucracy(card, banner, visual);
   } else {
-    renderNormalCard(card);
+    renderNormalCard(card, banner, visual);
   }
 }
 
-function renderNormalCard(card) {
+function renderNormalCard(card, banner, visual) {
   const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) => `
-    <button class="opt" onclick="chooseOption(${i})">${o.t}</button>
-  `).join("");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
   stage.innerHTML = `
+    ${banner}
+    ${visual}
     <div class="card-cat"><span>${card.cat || "СОБЫТИЕ"}</span><span>${card.id}</span></div>
     <div class="card-title">${card.title}</div>
     <div class="card-desc">${card.desc}</div>
@@ -262,12 +271,14 @@ function renderNormalCard(card) {
   `;
 }
 
-function renderCutscene(card) {
+function renderCutscene(card, banner, visual) {
   const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) => `
-    <button class="opt" onclick="chooseOption(${i})">${o.t}</button>
-  `).join("");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
   stage.innerHTML = `
+    ${banner}
+    ${visual}
     <div class="card-cat"><span>ОСТРОВОК РАССЛАБЛЕНИЯ</span></div>
     <div class="card-title">${card.title}</div>
     <div class="cutscene">${card.cut}</div>
@@ -275,17 +286,19 @@ function renderCutscene(card) {
   `;
 }
 
-function renderBureaucracy(card) {
+function renderBureaucracy(card, banner, visual) {
   const stage = document.getElementById("stage");
   const fields = card.doc.fields.map(f => `
     <div class="doc-field ${f.err ? 'err' : ''}">
       <span>${f.k}</span><span>${f.v}</span>
     </div>
   `).join("");
-  const opts = card.opts.map((o, i) => `
-    <button class="opt" onclick="chooseOption(${i})">${o.t}</button>
-  `).join("");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
   stage.innerHTML = `
+    ${banner}
+    ${visual}
     <div class="card-cat"><span>БЮРОКРАТИЧЕСКИЙ СТОЛ</span></div>
     <div class="card-title">${card.title}</div>
     <div class="doc">
@@ -297,13 +310,13 @@ function renderBureaucracy(card) {
 }
 
 function chooseOption(i) {
+  if (busy) return;
   const card = S.pendingCard;
   if (!card) return;
   const opt = card.opts[i];
   if (!opt) return;
   log(`▸ ${opt.t}`, "amber");
   applyEffects(opt.e);
-  // Мини-проверки после эффекта
   if (S.cyber >= 100) { S.ended = true; S.endingId = "cyber_end"; }
   advancePhase();
 }
@@ -319,6 +332,7 @@ function renderEnding() {
   const stage = document.getElementById("stage");
   const hud = document.getElementById("hud");
   hud.innerHTML = "";
+  stage.className = "stage-scene-apartment";
   const e = ENDINGS.find(x => x.id === S.endingId) || {
     title: "СМЕРТЬ",
     tag: "ТЕЛО СДАЛОСЬ",
@@ -336,7 +350,7 @@ function renderEnding() {
       <div class="doc-field"><span>Эфир</span><span>${S.factions.ether}</span></div>
       <div class="doc-field"><span>Коготь</span><span>${S.factions.claw}</span></div>
       <div class="doc-field"><span>Поток</span><span>${S.factions.stream}</span></div>
-      <div class="doc-field"><span>Ви</span><span>${S.rel.v}</span></div>
+      <div class="doc-field"><span>Сай</span><span>${S.rel.v}</span></div>
     </div>
     <div class="options" style="margin-top:20px">
       <button class="opt" onclick="restart()">Начать новую жизнь</button>
@@ -347,11 +361,11 @@ function renderEnding() {
 function restart() {
   localStorage.removeItem(SAVE_KEY);
   S = newState();
+  busy = false;
   log("Новая жизнь. День 1.", "green");
   render();
 }
 
-// --- СОХРАНЕНИЕ ---
 function saveGame() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(S));
@@ -369,7 +383,6 @@ function loadGame() {
   } catch (e) { return false; }
 }
 
-// --- МЕНЮ ---
 function openMenu() {
   const m = document.getElementById("modal");
   m.classList.remove("hidden");
@@ -381,7 +394,7 @@ function openMenu() {
         <button class="opt" onclick="if(confirm('Начать заново? Прогресс будет потерян.')){restart();closeMenu()}">Новая жизнь</button>
         <button class="opt" onclick="closeMenu()">Закрыть</button>
       </div>
-      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL: LIFE PROTOCOL · vertical slice v0.1</p>
+      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL: LIFE PROTOCOL · vertical slice v0.2</p>
     </div>
   `;
 }
@@ -389,7 +402,6 @@ function closeMenu() {
   document.getElementById("modal").classList.add("hidden");
 }
 
-// --- СТАРТ ---
 function boot() {
   if (!loadGame()) {
     S = newState();
@@ -401,16 +413,13 @@ function boot() {
 }
 
 window.addEventListener("load", boot);
-
-// Автосейв при сворачивании
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) saveGame();
 });
 
-// Глобальные функции для onclick
 window.advancePhase = advancePhase;
 window.chooseOption = chooseOption;
-window.restart = restart;
-window.saveGame = saveGame;
-window.openMenu = openMenu;
-window.closeMenu = closeMenu;
+window.restart      = restart;
+window.saveGame     = saveGame;
+window.openMenu     = openMenu;
+window.closeMenu    = closeMenu;
