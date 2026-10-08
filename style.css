@@ -71,6 +71,8 @@ html, body {
   grid-column: 1 / -1; display: flex; justify-content: space-between;
   font-size: 10px; color: var(--dim);
 }
+.hud-warn { color: var(--danger); animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 #stage {
   flex: 1;
@@ -132,6 +134,7 @@ html, body {
 }
 .scene-banner .loc { color: var(--cyan); }
 .scene-banner .phase-tag { color: var(--dim); }
+.scene-banner.story .loc { color: var(--amber); }
 
 .portrait-frame {
   width: 96px;
@@ -177,6 +180,7 @@ html, body {
   text-transform: uppercase; margin-bottom: 6px;
   display: flex; justify-content: space-between;
 }
+.card-cat.story { color: var(--amber); font-weight: bold; }
 .card-title {
   font-size: 17px; color: var(--amber); margin-bottom: 10px;
   border-bottom: 1px dashed var(--border); padding-bottom: 8px;
@@ -264,14 +268,6 @@ html, body {
 .modal-box h2 { color: var(--amber); font-size: 16px; margin-bottom: 12px; }
 .modal-box p  { margin-bottom: 16px; font-size: 13px; }
 
-.menu-btn {
-  position: absolute; top: 8px; right: 8px;
-  background: transparent; border: 1px solid var(--border-hi);
-  color: var(--dim); font-family: inherit; font-size: 11px;
-  padding: 4px 8px; cursor: pointer;
-}
-.menu-btn:hover { color: var(--amber); border-color: var(--amber); }
-
 .ending-title {
   color: var(--amber); font-size: 22px; text-align: center;
   margin: 30px 0 20px; letter-spacing: 4px;
@@ -305,4 +301,4 @@ html, body {
   15%  { opacity: 1; }
   85%  { opacity: 1; }
   100% { opacity: 0; }
-}
+    }
