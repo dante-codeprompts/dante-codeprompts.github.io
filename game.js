@@ -254,4 +254,195 @@ function renderStage() {
   stage.className = "stage-scene-" + sceneKey;
 
   const bannerClass = card.story ? "scene-banner story" : "scene-banner";
-  const banner
+  const banner = `
+    <div class="${bannerClass}">
+      <span class="loc">${scene.icon} ${scene.label}</span>
+      <span class="phase-tag">${PHASE_ICONS[S.phase]} ${PHASE_NAMES[S.phase]}</span>
+    </div>
+  `;
+
+  let visual = "";
+  const portrait = getPortraitForCard(card);
+  const cutsceneSvg = (typeof ART.cutscenes !== "undefined") ? ART.cutscenes[card.id] : null;
+  if (portrait) {
+    visual = `<div class="portrait-frame">${portrait}</div>`;
+  } else if (cutsceneSvg) {
+    visual = `<div class="cutscene-frame">${cutsceneSvg}</div>`;
+  }
+
+  if (card.desc === "cutscene") {
+    renderCutscene(card, banner, visual);
+  } else if (card.desc === "bureaucracy") {
+    renderBureaucracy(card, banner, visual);
+  } else {
+    renderNormalCard(card, banner, visual);
+  }
+}
+
+function renderNormalCard(card, banner, visual) {
+  const stage = document.getElementById("stage");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
+  const catClass = card.story ? "card-cat story" : "card-cat";
+  const catLabel = card.story ? "★ " + (card.cat || "СЮЖЕТ") : (card.cat || "СОБЫТИЕ");
+  stage.innerHTML = `
+    ${banner}
+    ${visual}
+    <div class="${catClass}"><span>${catLabel}</span><span>${card.id}</span></div>
+    <div class="card-title">${card.title}</div>
+    <div class="card-desc">${card.desc}</div>
+    <div class="options">${opts}</div>
+  `;
+}
+
+function renderCutscene(card, banner, visual) {
+  const stage = document.getElementById("stage");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
+  stage.innerHTML = `
+    ${banner}
+    ${visual}
+    <div class="card-cat"><span>МГНОВЕНИЕ</span></div>
+    <div class="card-title">${card.title}</div>
+    <div class="cutscene">${card.cut}</div>
+    <div class="options">${opts}</div>
+  `;
+}
+
+function renderBureaucracy(card, banner, visual) {
+  const stage = document.getElementById("stage");
+  const fields = card.doc.fields.map(f => `
+    <div class="doc-field ${f.err ? 'err' : ''}">
+      <span>${f.k}</span><span>${f.v}</span>
+    </div>
+  `).join("");
+  const opts = card.opts.map((o, i) =>
+    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
+  ).join("");
+  stage.innerHTML = `
+    ${banner}
+    ${visual}
+    <div class="card-cat"><span>БЮРОКРАТИЧЕСКИЙ СТОЛ</span></div>
+    <div class="card-title">${card.title}</div>
+    <div class="doc">
+      <div style="color:var(--dim);font-size:11px;margin-bottom:6px">${card.doc.title}</div>
+      ${fields}
+    </div>
+    <div class="options">${opts}</div>
+  `;
+}
+
+function chooseOption(i) {
+  if (busy) return;
+  const card = S.pendingCard;
+  if (!card) return;
+  const opt = card.opts[i];
+  if (!opt) return;
+  log(`▸ ${opt.t}`, "amber");
+  applyEffects(opt.e);
+  if (S.cyber >= 100) { S.ended = true; S.endingId = "cyber_end"; }
+  advancePhase();
+}
+
+function renderLog() {
+  const logEl = document.getElementById("log");
+  logEl.innerHTML = S.log.slice(0, 12).map(l =>
+    `<div class="log-line ${l.cls}"><span class="t">[Д${l.day}]</span> ${l.msg}</div>`
+  ).join("");
+}
+
+function renderEnding() {
+  const stage = document.getElementById("stage");
+  const hud = document.getElementById("hud");
+  hud.innerHTML = "";
+  stage.className = "stage-scene-apartment";
+  const e = ENDINGS.find(x => x.id === S.endingId) || ENDINGS[0];
+  stage.innerHTML = `
+    <div class="ending-title">${e.title}</div>
+    <div class="ending-tag">${e.tag}</div>
+    <div class="ending-desc">${e.desc}</div>
+    <div class="card-cat" style="margin-top:20px">ИТОГ ЖИЗНИ</div>
+    <div class="doc">
+      <div class="doc-field"><span>Дней прожито</span><span>${S.day}</span></div>
+      <div class="doc-field"><span>Кредитов</span><span>₡${S.credits}</span></div>
+      <div class="doc-field"><span>Киберпсихоз</span><span>${S.cyber}%</span></div>
+      <div class="doc-field"><span>Эфир</span><span>${S.factions.ether}</span></div>
+      <div class="doc-field"><span>Коготь</span><span>${S.factions.claw}</span></div>
+      <div class="doc-field"><span>Поток</span><span>${S.factions.stream}</span></div>
+      <div class="doc-field"><span>Сай</span><span>${S.rel.v}</span></div>
+      <div class="doc-field"><span>Кестрел</span><span>${S.rel.kestrel}</span></div>
+      <div class="doc-field"><span>Мира</span><span>${S.rel.mira}</span></div>
+    </div>
+    <div class="options" style="margin-top:20px">
+      <button class="opt" onclick="restart()">Прожить другую жизнь</button>
+    </div>
+  `;
+}
+
+function restart() {
+  localStorage.removeItem(SAVE_KEY);
+  S = newState();
+  busy = false;
+  log("Новая жизнь. День 1.", "green");
+  render();
+}
+
+function saveGame() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(S));
+    log("Сохранено.", "green");
+    renderLog();
+  } catch (e) { log("Ошибка: " + e.message, "danger"); }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    S = JSON.parse(raw);
+    return true;
+  } catch (e) { return false; }
+}
+
+function openMenu() {
+  const m = document.getElementById("modal");
+  m.classList.remove("hidden");
+  m.innerHTML = `
+    <div class="modal-box">
+      <h2>СИСТЕМА</h2>
+      <div class="options">
+        <button class="opt" onclick="saveGame();closeMenu()">Сохранить</button>
+        <button class="opt" onclick="if(confirm('Начать заново?')){restart();closeMenu()}">Новая жизнь</button>
+        <button class="opt" onclick="closeMenu()">Закрыть</button>
+      </div>
+      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL v0.3 · сюжет 7 дней</p>
+    </div>
+  `;
+}
+function closeMenu() {
+  document.getElementById("modal").classList.add("hidden");
+}
+
+function boot() {
+  if (!loadGame()) {
+    S = newState();
+    log("Пробуждение. День 1.", "green");
+    log("Капсула 7-Б. Сектор 12.", "");
+  }
+  checkEnding();
+  render();
+}
+
+window.addEventListener("load", boot);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) saveGame();
+});
+
+window.advancePhase = advancePhase;
+window.chooseOption = chooseOption;
+window.restart = restart;
+window.saveGame = saveGame;
+window.openMenu = openMenu;
+window.closeMenu = closeMenu;
