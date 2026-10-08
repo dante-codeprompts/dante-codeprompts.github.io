@@ -1,8 +1,8 @@
 // ============================================================
-// CYBERCELL: LIFE PROTOCOL — движок и UI
+// CYBERCELL: LIFE PROTOCOL — движок
 // ============================================================
 
-const SAVE_KEY = "cybercell_save_v1";
+const SAVE_KEY = "cybercell_save_v3";
 
 function newState() {
   return {
@@ -16,7 +16,6 @@ function newState() {
     rel: { v: 0, kestrel: 0, mira: 0 },
     factions: { ether: 0, claw: 0, stream: 0, lotus: 0, free: 0 },
     location: "apartment",
-    statuses: [],
     usedOnce: [],
     cooldowns: {},
     scheduled: [],
@@ -29,7 +28,7 @@ function newState() {
 let S = newState();
 let busy = false;
 
-function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function log(msg, cls = "") {
   S.log.unshift({ msg, cls, day: S.day, phase: S.phase });
   if (S.log.length > 30) S.log.pop();
@@ -37,27 +36,22 @@ function log(msg, cls = "") {
 
 function checkReq(req, s) {
   if (!req) return true;
+  if (req.day_exact !== undefined && s.day !== req.day_exact) return false;
   if (req.phase && !req.phase.includes(s.phase)) return false;
   if (req.location && !req.location.includes(s.location)) return false;
   if (req.day_min !== undefined && s.day < req.day_min) return false;
   if (req.cyber_min !== undefined && s.cyber < req.cyber_min) return false;
   if (req.cyber_max !== undefined && s.cyber > req.cyber_max) return false;
-  if (req.flag) {
-    for (const k in req.flag) {
-      if ((s.flags[k] || false) !== req.flag[k]) return false;
-    }
+  if (req.flag) for (const k in req.flag) {
+    if ((s.flags[k] || false) !== req.flag[k]) return false;
   }
-  if (req.rel) {
-    for (const k in req.rel) {
-      const v = s.rel[k] || 0;
-      if (typeof req.rel[k] === "number" && v < req.rel[k]) return false;
-    }
+  if (req.rel) for (const k in req.rel) {
+    const v = s.rel[k] || 0;
+    if (typeof req.rel[k] === "number" && v < req.rel[k]) return false;
   }
-  if (req.faction) {
-    for (const k in req.faction) {
-      const v = s.factions[k] || 0;
-      if (typeof req.faction[k] === "number" && v < req.faction[k]) return false;
-    }
+  if (req.faction) for (const k in req.faction) {
+    const v = s.factions[k] || 0;
+    if (typeof req.faction[k] === "number" && v < req.faction[k]) return false;
   }
   return true;
 }
@@ -74,11 +68,20 @@ function applyEffects(e) {
   if (e.rel)     for (const k in e.rel)     S.rel[k]     = clamp((S.rel[k] || 0) + e.rel[k], -100, 100);
   if (e.faction) for (const k in e.faction) S.factions[k] = clamp((S.factions[k] || 0) + e.faction[k], -100, 100);
   if (e.counter) for (const k in e.counter) S.counters[k] = (S.counters[k] || 0) + e.counter[k];
-  if (e.schedule) S.scheduled.push(e.schedule);
 }
 
-function pickCard() {
+// Обязательная сюжетная карточка — приоритет над свободным пулом
+function pickStoryCard() {
+  return CARDS.find(c =>
+    c.story === true &&
+    !S.usedOnce.includes(c.id) &&
+    checkReq(c.req, S)
+  ) || null;
+}
+
+function pickFreeCard() {
   const pool = CARDS.filter(c => {
+    if (c.story) return false;
     if (c.once && S.usedOnce.includes(c.id)) return false;
     if (c.cd && S.cooldowns[c.id] && S.cooldowns[c.id] > S.day) return false;
     return checkReq(c.req, S);
@@ -119,23 +122,35 @@ function newDay() {
   S.day += 1;
   S.phase = "morning";
 
-  const dailyCost = 15;
-  S.credits = Math.max(0, S.credits - dailyCost);
+  // Ежедневные расходы
+  S.credits = Math.max(0, S.credits - 15);
   if (S.credits <= 0) {
     S.stats.stress = clamp(S.stats.stress + 10, 0, 100);
     log("Нечем платить за капсулу. Стресс +10", "danger");
   }
 
-  S.stats.hunger = clamp(S.stats.hunger + 15, 0, 100);
-  if (S.stats.hunger > 70) {
+  // Голод
+  S.stats.hunger = clamp(S.stats.hunger + 20, 0, 100);
+  if (S.stats.hunger >= 100) {
+    S.stats.health = clamp(S.stats.health - 20, 0, 100);
+    log("Голод критичен. Здоровье -20", "danger");
+  } else if (S.stats.hunger > 70) {
     S.stats.health = clamp(S.stats.health - 5, 0, 100);
+    log("Ты голоден. Здоровье -5", "amber");
   }
 
+  // Стресс высокий — снижает здоровье
+  if (S.stats.stress > 80) {
+    S.stats.health = clamp(S.stats.health - 8, 0, 100);
+    log("Стресс разрушает тело. Здоровье -8", "danger");
+  }
+
+  // Естественное снижение киберпсихоза
   if (S.cyber > 0) S.cyber = clamp(S.cyber - 1, 0, 100);
 
+  // Отложенные события (заглушка)
   S.scheduled = S.scheduled.filter(ev => {
     if (ev.in_days <= 0) {
-      if (ev.flag && !S.flags[ev.flag]) return false;
       log(`Отложенное событие: ${ev.id}`, "amber");
       return false;
     }
@@ -189,13 +204,15 @@ function renderHUD() {
     : S.cyber < 51 ? "#ffcc00"
     : S.cyber < 76 ? "var(--amber)"
     : "var(--danger)";
+  const healthClass = S.stats.health < 30 ? "d hud-warn" : "g";
+  const hungerClass = S.stats.hunger > 70 ? "d hud-warn" : "";
   hud.innerHTML = `
     <div class="hud-row"><span class="hud-label">День</span><span class="hud-val">${S.day} · ${PHASE_NAMES[S.phase]}</span></div>
     <div class="hud-row"><span class="hud-label">Кредиты</span><span class="hud-val">₡${S.credits}</span></div>
-    <div class="hud-row"><span class="hud-label">Здоровье</span><span class="hud-val ${S.stats.health < 30 ? 'd' : 'g'}">${S.stats.health}</span></div>
+    <div class="hud-row"><span class="hud-label">Здоровье</span><span class="hud-val ${healthClass}">${S.stats.health}</span></div>
     <div class="hud-row"><span class="hud-label">Стресс</span><span class="hud-val ${S.stats.stress > 70 ? 'd' : ''}">${S.stats.stress}</span></div>
     <div class="hud-row"><span class="hud-label">Ясность</span><span class="hud-val c">${S.stats.clarity}</span></div>
-    <div class="hud-row"><span class="hud-label">Голод</span><span class="hud-val ${S.stats.hunger > 70 ? 'd' : ''}">${S.stats.hunger}</span></div>
+    <div class="hud-row"><span class="hud-label">Голод</span><span class="hud-val ${hungerClass}">${S.stats.hunger}</span></div>
     <div class="hud-cyber-bar"><div class="hud-cyber-fill" style="width:${S.cyber}%;background:${cyberColor}"></div></div>
     <div class="hud-cyber-text"><span>КИБЕРПСИХОЗ</span><span style="color:${cyberColor}">${S.cyber}%</span></div>
   `;
@@ -204,14 +221,18 @@ function renderHUD() {
 function renderStage() {
   const stage = document.getElementById("stage");
 
-  if (S.stats.health <= 0) {
+  // Проверка смерти от голода/здоровья
+  if (S.stats.health <= 0 || S.stats.hunger >= 100) {
     S.ended = true;
     S.endingId = "death_end";
     renderEnding();
     return;
   }
 
-  const card = pickCard();
+  // СЮЖЕТ ИМЕЕТ ПРИОРИТЕТ
+  let card = pickStoryCard();
+  if (!card) card = pickFreeCard();
+
   if (!card) {
     stage.className = "stage-scene-apartment";
     stage.innerHTML = `
@@ -220,206 +241,17 @@ function renderStage() {
         <span class="phase-tag">${PHASE_ICONS[S.phase]} ${PHASE_NAMES[S.phase]}</span>
       </div>
       <div class="card-title">Ничего не происходит</div>
-      <div class="card-desc">В это время суток здесь нечего делать. Ты просто существуешь.</div>
+      <div class="card-desc">Ты просто существуешь. Ждёшь.</div>
       <div class="options"><button class="opt" onclick="advancePhase()">Ждать</button></div>
     `;
     return;
   }
+
   S.pendingCard = card;
 
   const sceneKey = getSceneForCard(card, S);
   const scene = ART.locations[sceneKey] || ART.locations.apartment;
   stage.className = "stage-scene-" + sceneKey;
 
-  const banner = `
-    <div class="scene-banner">
-      <span class="loc">${scene.icon} ${scene.label}</span>
-      <span class="phase-tag">${PHASE_ICONS[S.phase]} ${PHASE_NAMES[S.phase]}</span>
-    </div>
-  `;
-
-  let visual = "";
-  const portrait = getPortraitForCard(card);
-  const cutsceneSvg = (typeof ART.cutscenes !== "undefined") ? ART.cutscenes[card.id] : null;
-  if (portrait) {
-    visual = `<div class="portrait-frame">${portrait}</div>`;
-  } else if (cutsceneSvg) {
-    visual = `<div class="cutscene-frame">${cutsceneSvg}</div>`;
-  }
-
-  if (card.desc === "cutscene") {
-    renderCutscene(card, banner, visual);
-  } else if (card.desc === "bureaucracy") {
-    renderBureaucracy(card, banner, visual);
-  } else {
-    renderNormalCard(card, banner, visual);
-  }
-}
-
-function renderNormalCard(card, banner, visual) {
-  const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) =>
-    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
-  ).join("");
-  stage.innerHTML = `
-    ${banner}
-    ${visual}
-    <div class="card-cat"><span>${card.cat || "СОБЫТИЕ"}</span><span>${card.id}</span></div>
-    <div class="card-title">${card.title}</div>
-    <div class="card-desc">${card.desc}</div>
-    <div class="options">${opts}</div>
-  `;
-}
-
-function renderCutscene(card, banner, visual) {
-  const stage = document.getElementById("stage");
-  const opts = card.opts.map((o, i) =>
-    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
-  ).join("");
-  stage.innerHTML = `
-    ${banner}
-    ${visual}
-    <div class="card-cat"><span>ОСТРОВОК РАССЛАБЛЕНИЯ</span></div>
-    <div class="card-title">${card.title}</div>
-    <div class="cutscene">${card.cut}</div>
-    <div class="options">${opts}</div>
-  `;
-}
-
-function renderBureaucracy(card, banner, visual) {
-  const stage = document.getElementById("stage");
-  const fields = card.doc.fields.map(f => `
-    <div class="doc-field ${f.err ? 'err' : ''}">
-      <span>${f.k}</span><span>${f.v}</span>
-    </div>
-  `).join("");
-  const opts = card.opts.map((o, i) =>
-    `<button class="opt" onclick="chooseOption(${i})">${o.t}</button>`
-  ).join("");
-  stage.innerHTML = `
-    ${banner}
-    ${visual}
-    <div class="card-cat"><span>БЮРОКРАТИЧЕСКИЙ СТОЛ</span></div>
-    <div class="card-title">${card.title}</div>
-    <div class="doc">
-      <div style="color:var(--dim);font-size:11px;margin-bottom:6px">${card.doc.title}</div>
-      ${fields}
-    </div>
-    <div class="options">${opts}</div>
-  `;
-}
-
-function chooseOption(i) {
-  if (busy) return;
-  const card = S.pendingCard;
-  if (!card) return;
-  const opt = card.opts[i];
-  if (!opt) return;
-  log(`▸ ${opt.t}`, "amber");
-  applyEffects(opt.e);
-  if (S.cyber >= 100) { S.ended = true; S.endingId = "cyber_end"; }
-  advancePhase();
-}
-
-function renderLog() {
-  const logEl = document.getElementById("log");
-  logEl.innerHTML = S.log.slice(0, 12).map(l =>
-    `<div class="log-line ${l.cls}"><span class="t">[Д${l.day} ${PHASE_NAMES[l.phase]?.[0]||''}]</span> ${l.msg}</div>`
-  ).join("");
-}
-
-function renderEnding() {
-  const stage = document.getElementById("stage");
-  const hud = document.getElementById("hud");
-  hud.innerHTML = "";
-  stage.className = "stage-scene-apartment";
-  const e = ENDINGS.find(x => x.id === S.endingId) || {
-    title: "СМЕРТЬ",
-    tag: "ТЕЛО СДАЛОСЬ",
-    desc: "Твоё тело не выдержало. Город не заметил.\n\nСоседи узнали через 4 дня — по запаху.\n\nКто-то занял твою капсулу уже на следующий день.",
-  };
-  stage.innerHTML = `
-    <div class="ending-title">${e.title}</div>
-    <div class="ending-tag">${e.tag}</div>
-    <div class="ending-desc">${e.desc}</div>
-    <div class="card-cat" style="margin-top:20px">ИТОГ</div>
-    <div class="doc">
-      <div class="doc-field"><span>Дней прожито</span><span>${S.day}</span></div>
-      <div class="doc-field"><span>Кредитов</span><span>₡${S.credits}</span></div>
-      <div class="doc-field"><span>Киберпсихоз</span><span>${S.cyber}%</span></div>
-      <div class="doc-field"><span>Эфир</span><span>${S.factions.ether}</span></div>
-      <div class="doc-field"><span>Коготь</span><span>${S.factions.claw}</span></div>
-      <div class="doc-field"><span>Поток</span><span>${S.factions.stream}</span></div>
-      <div class="doc-field"><span>Сай</span><span>${S.rel.v}</span></div>
-    </div>
-    <div class="options" style="margin-top:20px">
-      <button class="opt" onclick="restart()">Начать новую жизнь</button>
-    </div>
-  `;
-}
-
-function restart() {
-  localStorage.removeItem(SAVE_KEY);
-  S = newState();
-  busy = false;
-  log("Новая жизнь. День 1.", "green");
-  render();
-}
-
-function saveGame() {
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(S));
-    log("Сохранено.", "green");
-    renderLog();
-  } catch (e) { log("Ошибка сохранения: " + e.message, "danger"); renderLog(); }
-}
-
-function loadGame() {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return false;
-    S = JSON.parse(raw);
-    return true;
-  } catch (e) { return false; }
-}
-
-function openMenu() {
-  const m = document.getElementById("modal");
-  m.classList.remove("hidden");
-  m.innerHTML = `
-    <div class="modal-box">
-      <h2>СИСТЕМА</h2>
-      <div class="options">
-        <button class="opt" onclick="saveGame();closeMenu()">Сохранить</button>
-        <button class="opt" onclick="if(confirm('Начать заново? Прогресс будет потерян.')){restart();closeMenu()}">Новая жизнь</button>
-        <button class="opt" onclick="closeMenu()">Закрыть</button>
-      </div>
-      <p style="margin-top:14px;font-size:11px;color:var(--dim)">CYBERCELL: LIFE PROTOCOL · vertical slice v0.2</p>
-    </div>
-  `;
-}
-function closeMenu() {
-  document.getElementById("modal").classList.add("hidden");
-}
-
-function boot() {
-  if (!loadGame()) {
-    S = newState();
-    log("Пробуждение. День 1.", "green");
-    log("Капсула 7-Б. Сектор 12. Нижний-Средний.", "");
-  }
-  checkEnding();
-  render();
-}
-
-window.addEventListener("load", boot);
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) saveGame();
-});
-
-window.advancePhase = advancePhase;
-window.chooseOption = chooseOption;
-window.restart      = restart;
-window.saveGame     = saveGame;
-window.openMenu     = openMenu;
-window.closeMenu    = closeMenu;
+  const bannerClass = card.story ? "scene-banner story" : "scene-banner";
+  const banner
